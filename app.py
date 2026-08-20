@@ -723,6 +723,8 @@ async def quantize(request: Request):
 
     phase = body.get("phase")
 
+    print("QUANTIZE_REQUEST:", json.dumps(body, ensure_ascii=False, separators=(",", ":")), flush=True)
+
     if phase == "freeze":
 
         if not valid_freeze_request(body):
