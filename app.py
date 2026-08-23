@@ -41,7 +41,7 @@ def nonempty_string(value: Any) -> bool:
     if not isinstance(value, str):
         return False
 
-    if len(value) == 0:
+    if not value:
         return False
 
     try:
@@ -53,13 +53,11 @@ def nonempty_string(value: Any) -> bool:
 
 
 def unique_strings(value: Any) -> bool:
-    if not isinstance(value, list):
-        return False
-
-    if not all(nonempty_string(x) for x in value):
-        return False
-
-    return len(value) == len(set(value))
+    return (
+        isinstance(value, list)
+        and all(nonempty_string(x) for x in value)
+        and len(value) == len(set(value))
+    )
 
 
 def safe_integer(value: Any) -> bool:
@@ -86,8 +84,6 @@ def finite_floor(value: Any) -> bool:
 
 
 def binary_value(value: Any) -> bool:
-    # Only integer 0 and 1 are valid binary values.
-    # True/False and 0.0/1.0 are rejected.
     return type(value) is int and value in (0, 1)
 
 
@@ -97,14 +93,13 @@ def binary_value(value: Any) -> bool:
 
 def build_inventory(files: Any):
     """
-    Build the exact inventory required by the specification.
+    Build inventory from the candidate file object.
 
     Returns:
-        inventory, totalBytes, packageDigest
+        (inventory, totalBytes, packageDigest)
 
-    None means the files object itself is malformed.
-
-    Empty files object is treated as a candidate-level
+    Returns None if the files object is malformed.
+    An empty files object is handled as a candidate-level
     invalid manifest.
     """
 
@@ -115,17 +110,17 @@ def build_inventory(files: Any):
         return [], None, None
 
     inventory = []
-    names = set()
+    seen = set()
 
     for filename, content in files.items():
 
         if not nonempty_string(filename):
             return None
 
-        if filename in names:
+        if filename in seen:
             return None
 
-        names.add(filename)
+        seen.add(filename)
 
         if not isinstance(content, str):
             return None
@@ -165,8 +160,9 @@ def build_inventory(files: Any):
 
 def rebuild_inventory(inventory: Any):
     """
-    Recompute inventory, totalBytes and packageDigest
-    without trusting submitted aggregate fields.
+    Recompute inventory, totalBytes and packageDigest.
+
+    Submitted totalBytes/packageDigest are never trusted.
     """
 
     if not isinstance(inventory, list):
@@ -176,7 +172,7 @@ def rebuild_inventory(inventory: Any):
         return [], None, None
 
     rebuilt = []
-    names = set()
+    seen = set()
 
     for item in inventory:
 
@@ -197,10 +193,10 @@ def rebuild_inventory(inventory: Any):
         if not nonempty_string(name):
             return None
 
-        if name in names:
+        if name in seen:
             return None
 
-        names.add(name)
+        seen.add(name)
 
         if not safe_integer(byte_count):
             return None
@@ -248,7 +244,7 @@ def rebuild_inventory(inventory: Any):
 
 
 # =========================================================
-# FREEZE VALIDATION
+# FREEZE REQUEST VALIDATION
 # =========================================================
 
 def valid_freeze_request(body: Any) -> bool:
@@ -287,7 +283,7 @@ def valid_freeze_request(body: Any) -> bool:
     if not isinstance(candidates, list):
         return False
 
-    # Empty candidate list is a whole-request error.
+    # Explicit whole-request failure condition.
     if len(candidates) == 0:
         return False
 
@@ -305,10 +301,9 @@ def valid_freeze_request(body: Any) -> bool:
 
         names.append(name)
 
-        # IMPORTANT:
-        # Do not reject the whole request because candidate.files
-        # is malformed. Invalid candidate manifests are handled
-        # at candidate level in perform_freeze().
+        # Candidate files are deliberately NOT validated here.
+        # Invalid candidate files are handled as candidate-level
+        # invalid manifests below.
 
     if len(names) != len(set(names)):
         return False
@@ -329,14 +324,14 @@ def perform_freeze(body: dict[str, Any]):
 
         existing = FREEZES[freeze_id]
 
-        # Exact replay.
+        # Identical replay.
         if existing["request"] == body:
             return (
                 existing["response"],
                 200,
             )
 
-        # Same ID with different input.
+        # Different request with same freeze ID.
         return (
             {
                 "error": "FREEZE_ID_CONFLICT"
@@ -376,9 +371,7 @@ def perform_freeze(body: dict[str, Any]):
                     "inventory": [],
                     "totalBytes": None,
                     "packageDigest": None,
-                    "reasonCodes": [
-                        "INVALID_INPUT"
-                    ],
+                    "reasonCodes": [],
                 }
             )
 
@@ -398,9 +391,7 @@ def perform_freeze(body: dict[str, Any]):
                     "inventory": [],
                     "totalBytes": None,
                     "packageDigest": None,
-                    "reasonCodes": [
-                        "INVALID_INPUT"
-                    ],
+                    "reasonCodes": [],
                 }
             )
 
@@ -835,7 +826,7 @@ def perform_select(
         freeze_id
     )
 
-    # Unknown freeze.
+    # Unknown freeze ID.
     if stored is None:
 
         return (
@@ -982,8 +973,8 @@ def perform_select(
             name
         )
 
-        # Supplied candidate must exactly match
-        # the recorded frozen response.
+        # Supplied candidate must exactly equal
+        # the recorded frozen candidate.
         manifest_valid = (
             record is not None
             and isinstance(
@@ -1013,8 +1004,8 @@ def perform_select(
                 "INVALID_PREDICTIONS"
             )
 
-        # totalBytes is only returned when the manifest
-        # can be validated.
+        # totalBytes is only returned when
+        # manifest validation succeeds.
         total_bytes = None
 
         if manifest_valid:
@@ -1022,7 +1013,8 @@ def perform_select(
                 "totalBytes"
             ]
 
-        # latencyMs is only returned when it can be validated.
+        # latencyMs is only returned when
+        # latency validation succeeds.
         latency_ms = None
 
         if (
@@ -1118,7 +1110,7 @@ def perform_select(
                     "LATENCY_LIMIT"
                 )
 
-        # Only frozen candidates can win.
+        # Only frozen candidates may win.
         if (
             record is None
             or record["status"]
@@ -1231,7 +1223,7 @@ def perform_select(
 
 
 # =========================================================
-# API ENDPOINT
+# ENDPOINT
 # =========================================================
 
 @app.post("/quantize")
@@ -1299,8 +1291,10 @@ async def quantize(
 
     if phase == "select":
 
-        # Assignment explicitly requires candidates and
-        # rows to be arrays and policy to be an object.
+        # The assignment explicitly requires:
+        # candidates = array
+        # rows = array
+        # policy = object
         if (
             not isinstance(
                 body.get("candidates"),
